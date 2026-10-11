@@ -37,6 +37,29 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
+// CORS: allow the deployed frontend (Vercel / Netlify) and local development
+builder.Services.AddCors(o => o.AddPolicy("Frontend", p =>
+{
+    p.WithOrigins("https://campuseats-web.vercel.app")
+     .SetIsOriginAllowed(origin =>
+     {
+         if (string.IsNullOrWhiteSpace(origin)) return false;
+         try
+         {
+             var uri = new Uri(origin);
+             return uri.Host == "localhost" ||
+                    uri.Host.EndsWith("vercel.app", StringComparison.OrdinalIgnoreCase) ||
+                    uri.Host.EndsWith("netlify.app", StringComparison.OrdinalIgnoreCase);
+         }
+         catch
+         {
+             return false;
+         }
+     })
+     .AllowAnyHeader()
+     .AllowAnyMethod();
+}));
+
 // Database
 builder.Services.AddDbContext<AppDbContext>(opt =>
     opt.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
@@ -46,14 +69,17 @@ builder.Services.AddScoped<IMenuService, MenuService>();
 
 // JWT authentication
 var jwt = builder.Configuration.GetSection("Jwt");
-var key = Encoding.UTF8.GetBytes(jwt["Key"]!);
+var jwtKey = jwt["Key"] ?? "dev-only-secret-change-me-min-32-characters!!";
+var key = Encoding.UTF8.GetBytes(jwtKey);
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(opt => opt.TokenValidationParameters = new()
     {
-        ValidateIssuer = true, ValidIssuer = jwt["Issuer"],
-        ValidateAudience = true, ValidAudience = jwt["Audience"],
+        ValidateIssuer = true,
+        ValidIssuer = jwt["Issuer"] ?? "CampusEats",
+        ValidateAudience = true,
+        ValidAudience = jwt["Audience"] ?? "CampusEatsUsers",
         ValidateIssuerSigningKey = true,
         IssuerSigningKey = new SymmetricSecurityKey(key),
         ValidateLifetime = true
@@ -64,24 +90,37 @@ var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    if (!db.MenuItems.Any())
+    var services = scope.ServiceProvider;
+    try
     {
-        db.MenuItems.AddRange(
-            new MenuItem { Name = "Kottu Roti", Price = 750m, Category = "Mains" },
-            new MenuItem { Name = "Fried Rice", Price = 850m, Category = "Mains" },
-            new MenuItem { Name = "Watalappan", Price = 350m, Category = "Dessert" });
-        db.SaveChanges();
+        var db = services.GetRequiredService<AppDbContext>();
+        db.Database.Migrate();
+        if (!db.MenuItems.Any())
+        {
+            db.MenuItems.AddRange(
+                new MenuItem { Name = "Kottu Roti", Price = 750m, Category = "Mains" },
+                new MenuItem { Name = "Fried Rice", Price = 850m, Category = "Mains" },
+                new MenuItem { Name = "Watalappan", Price = 350m, Category = "Dessert" });
+            db.SaveChanges();
+        }
+    }
+    catch (Exception ex)
+    {
+        var logger = services.GetRequiredService<ILogger<Program>>();
+        logger.LogWarning(ex, "Could not apply database migrations or seed data at startup.");
     }
 }
 
+// Enable Swagger in all environments for easy API verification (Task 03 / Task 05)
+app.UseSwagger();
+app.UseSwaggerUI();
+
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseHttpsRedirection();
 }
 
-app.UseHttpsRedirection();
+app.UseCors("Frontend"); // before MapControllers()
 
 app.UseAuthentication();
 app.UseAuthorization();   
